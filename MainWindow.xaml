@@ -5,167 +5,188 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
         mc:Ignorable="d"
-        Title="AutoMedia AI (全能影音库版)" Height="900" Width="950"
+        Title="AutoMedia AI (终极体验版)" Height="950" Width="600"
         WindowStartupLocation="CenterScreen" ExtendsContentIntoTitleBar="True">
 
-    <Grid Margin="20">
+    <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Margin="0,0,0,15">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <StackPanel>
-                    <ui:TextBlock Text="🎬 AI 全能影音整理" FontTypography="TitleLarge" />
-                    <ui:TextBlock Text="自动分类：电影 / 动漫 / 剧集 / 纪录片" Appearance="Secondary" Margin="0,5,0,0"/>
-                </StackPanel>
-                <ui:Button Grid.Column="1" Content="重启软件" Icon="{ui:SymbolIcon ArrowClockwise24}" 
-                           Appearance="Secondary" Click="BtnRestart_Click"/>
-            </Grid>
-        </StackPanel>
+        <Grid Grid.Row="0" Height="40" Background="Transparent">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <ui:TitleBar Grid.Column="0" Title="🎬 影音自动化管家" Icon="{ui:SymbolIcon Video24}" />
+        </Grid>
 
-        <StackPanel Grid.Row="1">
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="20,0,20,0">
+            <StackPanel>
 
-            <ui:Card Margin="0,0,0,15">
-                <StackPanel>
-                    <ui:TextBlock Text="📂 路径设置" FontTypography="Subtitle" Margin="0,0,0,10"/>
-                    <Grid Margin="0,0,0,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <ui:TextBox x:Name="TxtSource" PlaceholderText="监控目录 (下载文件夹)" Margin="0,0,10,0"/>
-                        <ui:Button Content="选择" Grid.Column="1" Click="BtnSelectSource_Click" Icon="{ui:SymbolIcon Folder24}"/>
-                    </Grid>
+                <ui:TextBlock Text="智能重试 • 集数修正 • 系统托盘" FontTypography="Body" Foreground="Gray" Margin="0,0,0,15"/>
+
+                <ui:Card Margin="0,0,0,15">
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <ui:TextBox x:Name="TxtTarget" PlaceholderText="影视库根目录 (程序会自动创建 电影/动漫 子目录)" Margin="0,0,10,0"/>
-                        <ui:Button Content="选择" Grid.Column="1" Click="BtnSelectTarget_Click" Icon="{ui:SymbolIcon Folder24}"/>
+                        <StackPanel>
+                            <ui:TextBlock Text="⚙️ 系统设置" FontTypography="BodyStrong"/>
+                            <ui:TextBlock Text="管理启动与后台行为" FontTypography="Caption" Foreground="Gray"/>
+                        </StackPanel>
+                        <ui:ToggleSwitch x:Name="SwAutoStart" Grid.Column="1" Content="开机自启" Click="SwAutoStart_Click"/>
                     </Grid>
-                </StackPanel>
-            </ui:Card>
+                </ui:Card>
 
-            <ui:Card Margin="0,0,0,15">
-                <StackPanel>
-                    <Grid Margin="0,0,0,15">
+                <ui:Card Margin="0,0,0,15">
+                    <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <ui:TextBlock Text="💾 历史配置" FontTypography="Subtitle" VerticalAlignment="Center" Margin="0,0,10,0"/>
-
+                        <ui:TextBlock Text="💾 预设配置" VerticalAlignment="Center" Margin="0,0,10,0" FontTypography="BodyStrong"/>
                         <ComboBox x:Name="CmbProfiles" Grid.Column="1" Margin="0,0,10,0" 
                                   DisplayMemberPath="Remark" 
                                   SelectionChanged="CmbProfiles_SelectionChanged"
-                                  DropDownClosed="CmbProfiles_DropDownClosed"
-                                  IsEditable="False"/>
-
-                        <ui:Button x:Name="BtnSaveProfile" Grid.Column="2" Icon="{ui:SymbolIcon Save24}" 
-                                   ToolTip="保存当前配置" Margin="0,0,5,0" Click="BtnSaveProfile_Click"/>
-                        <ui:Button x:Name="BtnDeleteProfile" Grid.Column="3" Icon="{ui:SymbolIcon Delete24}" 
-                                   ToolTip="删除选中配置" Appearance="Danger" Click="BtnDeleteProfile_Click"/>
+                                  ToolTip="选择保存的配置"/>
+                        <ui:Button Grid.Column="2" Icon="{ui:SymbolIcon Save24}" Click="BtnSaveProfile_Click" Margin="0,0,5,0" ToolTip="保存当前配置"/>
+                        <ui:Button Grid.Column="3" Icon="{ui:SymbolIcon Delete24}" Click="BtnDeleteProfile_Click" Appearance="Danger" ToolTip="删除"/>
                     </Grid>
+                </ui:Card>
 
-                    <ui:VirtualizingItemsControl />
-                    <Border BorderThickness="0,1,0,0" BorderBrush="#33888888" Margin="0,0,0,15"/>
+                <ui:Card Margin="0,0,0,15">
+                    <StackPanel>
+                        <ui:TextBlock Text="📂 文件夹路径" FontTypography="BodyStrong" Margin="0,0,0,10"/>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:TextBox x:Name="TxtSource" PlaceholderText="监控/下载目录 (源)" Margin="0,0,10,0"/>
+                            <ui:Button Content="选择" Grid.Column="1" Click="BtnSelectSource_Click" Icon="{ui:SymbolIcon Folder24}"/>
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:TextBox x:Name="TxtTarget" PlaceholderText="媒体库目录 (目标)" Margin="0,0,10,0"/>
+                            <ui:Button Content="选择" Grid.Column="1" Click="BtnSelectTarget_Click" Icon="{ui:SymbolIcon Folder24}"/>
+                        </Grid>
+                    </StackPanel>
+                </ui:Card>
 
-                    <Grid Margin="0,0,0,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="1.2*"/>
-                            <ColumnDefinition Width="2*"/>
-                        </Grid.ColumnDefinitions>
-                        <ComboBox x:Name="CmbProviders" Margin="0,0,10,0"
-                                  DisplayMemberPath="Name" 
-                                  SelectionChanged="CmbProviders_SelectionChanged"
-                                  IsEditable="False"/>
-                        <ui:PasswordBox x:Name="TxtApiKey" Grid.Column="1" PlaceholderText="在此填入 AI API Key (sk-...)"/>
-                    </Grid>
+                <ui:Card Margin="0,0,0,15">
+                    <StackPanel>
+                        <ui:TextBlock Text="🔗 qBittorrent 连接" FontTypography="BodyStrong" Margin="0,0,0,10"/>
+                        <ui:TextBox x:Name="TxtQbUrl" PlaceholderText="地址 (例 http://127.0.0.1:8080)" Margin="0,0,0,10"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:TextBox x:Name="TxtQbUser" PlaceholderText="用户名" Margin="0,0,5,0"/>
+                            <ui:PasswordBox x:Name="TxtQbPass" Grid.Column="1" PlaceholderText="密码" Margin="5,0,10,0"/>
+                            <ui:Button Grid.Column="2" Content="验证" Click="BtnTestQb_Click"/>
+                        </Grid>
+                    </StackPanel>
+                </ui:Card>
 
-                    <Grid Margin="0,0,0,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <ui:TextBox x:Name="TxtApiUrl" PlaceholderText="API 地址 (自动填充)" Margin="0,0,5,0"/>
-                        <ui:TextBox x:Name="TxtModel" PlaceholderText="模型名称 (自动填充)" Grid.Column="1" Margin="5,0,0,0"/>
-                    </Grid>
+                <ui:Card Margin="0,0,0,15">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:TextBlock Text="🧠 AI 与 TMDB 刮削" FontTypography="BodyStrong" VerticalAlignment="Center"/>
+                            <ui:Button Grid.Column="1" Content="⚡ 测试连接" Click="BtnTestAi_Click" Appearance="Secondary" Height="30"/>
+                        </Grid>
 
-                    <ui:TextBox x:Name="TxtRemark" PlaceholderText="给当前配置起个名 (例如: 我的豆包VIP)" Margin="0,0,0,10"/>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="CmbProviders" Width="120" Margin="0,0,10,0" DisplayMemberPath="Name" SelectionChanged="CmbProviders_SelectionChanged"/>
+                            <ui:PasswordBox x:Name="TxtApiKey" Grid.Column="1" PlaceholderText="AI API Key (自动保存)"/>
+                        </Grid>
 
-                    <Border BorderThickness="0,1,0,0" BorderBrush="#33888888" Margin="0,5,0,15"/>
+                        <ui:TextBox x:Name="TxtApiUrl" PlaceholderText="API 地址 (自动填充)" Margin="0,0,0,10"/>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:TextBox x:Name="TxtModel" PlaceholderText="模型名称/接入点 (例 deepseek-chat)" Margin="0,0,5,0"/>
+                            <ui:TextBox x:Name="TxtRemark" Grid.Column="1" PlaceholderText="配置备注名 (如: 我的DeepSeek)" Margin="5,0,0,0"/>
+                        </Grid>
+                        <ui:PasswordBox x:Name="TxtTmdbKey" PlaceholderText="TMDB API Key" Margin="0,0,0,5"/>
+                    </StackPanel>
+                </ui:Card>
 
+                <ui:Card Margin="0,0,0,15">
                     <Grid>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
-                            <ui:SymbolIcon Symbol="Video24" Margin="0,0,8,0"/>
-                            <ui:TextBlock Text="TMDB Key:" VerticalAlignment="Center" FontWeight="Bold"/>
+                        <StackPanel Orientation="Horizontal">
+                            <RadioButton x:Name="RadioLink" Content="硬链接 (推荐)" IsChecked="True" GroupName="Mode" Margin="0,0,15,0"/>
+                            <RadioButton x:Name="RadioMove" Content="移动文件" GroupName="Mode"/>
                         </StackPanel>
-                        <ui:PasswordBox x:Name="TxtTmdbKey" Grid.Column="1" PlaceholderText="填入 Key 以区分电影/剧集并获取官方译名 (强烈推荐)"/>
+                        <CheckBox x:Name="SwSkipLink" Grid.Column="1" Content="跳过已存在" IsChecked="True"/>
                     </Grid>
-                </StackPanel>
-            </ui:Card>
+                </ui:Card>
 
-            <ui:Card>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
+                <ui:Card VerticalAlignment="Stretch" MinHeight="200">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <Grid Grid.Row="0" Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:TextBlock Text="📝 实时日志" FontTypography="Subtitle" VerticalAlignment="Center"/>
+                            <CheckBox x:Name="ChkDebug" Grid.Column="1" Content="🐞 调试模式" Margin="0,0,10,0"/>
+                            <ui:Button Grid.Column="2" Icon="{ui:SymbolIcon Delete24}" Appearance="Transparent" Click="BtnClearLog_Click" ToolTip="清空日志"/>
+                        </Grid>
+                        <RichTextBox x:Name="TxtLog" Grid.Row="1" IsReadOnly="True" 
+                                     VerticalScrollBarVisibility="Auto"
+                                     BorderThickness="0" Background="Transparent" 
+                                     FontFamily="Consolas, Microsoft YaHei">
+                            <FlowDocument/>
+                        </RichTextBox>
+                    </Grid>
+                </ui:Card>
 
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <ui:ToggleSwitch x:Name="SwSkipLink" Content="跳过已硬链" IsChecked="True" Margin="0,0,15,0"/>
-                        <ComboBox x:Name="CmbMode" SelectedIndex="0" Width="150">
-                            <ComboBoxItem Content="硬链接模式" />
-                            <ComboBoxItem Content="移动模式" />
-                        </ComboBox>
-                    </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
 
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                        <CheckBox x:Name="ChkAutoStart" Content="开机自启" Margin="0,0,15,0" Checked="ChkAutoStart_Changed" Unchecked="ChkAutoStart_Changed"/>
-                        <CheckBox x:Name="ChkTray" Content="关闭时最小化到托盘" IsChecked="True"/>
-                    </StackPanel>
-                </Grid>
-            </ui:Card>
-        </StackPanel>
-
-        <ui:Card Grid.Row="2" Margin="0,20,0,20" VerticalAlignment="Stretch">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-                <ui:TextBlock Text="📝 运行日志" FontTypography="Subtitle" Margin="0,0,0,10"/>
-                <TextBox x:Name="TxtLog" Grid.Row="1" IsReadOnly="True" 
-                         TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         BorderThickness="0" Background="Transparent" Foreground="#DDDDDD"/>
-            </Grid>
-        </ui:Card>
-
-        <Grid Grid.Row="3">
+        <Grid Grid.Row="2" Margin="20,15,20,20">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="15"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <ui:Button x:Name="BtnStart" Grid.Column="0" Content="启动全能监控" Icon="{ui:SymbolIcon Play24}" 
-                       Appearance="Primary" HorizontalAlignment="Stretch" Height="40" Click="BtnStart_Click"/>
-            <ui:Button x:Name="BtnManual" Grid.Column="2" Content="手动文件识别" Icon="{ui:SymbolIcon Open24}" 
-                       Appearance="Secondary" Height="40" Click="BtnManual_Click"/>
+                       Appearance="Primary" HorizontalAlignment="Stretch" Height="45" FontSize="16" Click="BtnStart_Click"/>
+            <ui:Button x:Name="BtnManual" Grid.Column="2" Content="手动测试" Icon="{ui:SymbolIcon Open24}" 
+                       Appearance="Secondary" Height="45" Click="BtnManual_Click"/>
         </Grid>
+
+        <ContentPresenter x:Name="RootContentDialogPresenter" Grid.Row="0" Grid.RowSpan="3" />
+
     </Grid>
 </ui:FluentWindow>

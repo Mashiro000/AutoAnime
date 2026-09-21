@@ -1,0 +1,62 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore AutoAnime.csproj
+
+      # 编译独立自包含版本（电脑无需预装 .NET 8 运行时，双击直接运行）
+      - name: Publish Standalone (Self-Contained)
+        run: |
+          dotnet publish AutoAnime.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish/standalone
+
+      # 编译轻量版（依赖系统已安装的 .NET 8 桌面运行时，体积更小）
+      - name: Publish Framework-Dependent
+        run: |
+          dotnet publish AutoAnime.csproj -c Release -r win-x64 --no-self-contained -p:PublishSingleFile=true -o ./publish/framework-dependent
+
+      # 打包为 zip 压缩包
+      - name: Package Archives
+        shell: pwsh
+        run: |
+          Compress-Archive -Path ./publish/standalone/* -DestinationPath ./AutoAnime-win-x64-standalone.zip
+          Compress-Archive -Path ./publish/framework-dependent/* -DestinationPath ./AutoAnime-win-x64-portable.zip
+
+      # 上传构件（无论是否打 tag，在 Actions 页面都可以直接下载）
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoAnime-Windows-Builds
+          path: |
+            ./AutoAnime-win-x64-standalone.zip
+            ./AutoAnime-win-x64-portable.zip
+
+      # 当推送 tag（例如 v2.0.0）时，自动创建 GitHub Release 并上传安装包
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./AutoAnime-win-x64-standalone.zip
+            ./AutoAnime-win-x64-portable.zip
+          generate_release_notes: true

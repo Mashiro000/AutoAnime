@@ -1,41 +1,85 @@
-﻿using System;
+﻿#nullable enable
+
+using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
-using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Windows.Documents;
 using Microsoft.Win32;
 using Wpf.Ui.Controls;
-using MessageBox = System.Windows.MessageBox;
+using Wpf.Ui.Appearance;
+using WinForms = System.Windows.Forms;
+
+// 解决引用冲突
+using MediaBrushes = System.Windows.Media.Brushes;
 
 namespace AutoAnime
 {
-    // --- 服务商模型 ---
-    public class ApiProvider
+    // --- 转换器 ---
+    public class FlexibleIntConverter : JsonConverter<int>
     {
-        public string Name { get; set; } = "";
-        public string Url { get; set; } = "";
-        public string DefaultModel { get; set; } = "";
-        public string Hint { get; set; } = "";
+        public override int Read(ref Utf8JsonReader r, Type t, JsonSerializerOptions o)
+        {
+            if (r.TokenType == JsonTokenType.String)
+            {
+                var s = r.GetString();
+                if (string.IsNullOrWhiteSpace(s)) return 0;
+                return int.TryParse(s, out int v) ? v : 0;
+            }
+            return r.TokenType == JsonTokenType.Number ? r.GetInt32() : 0;
+        }
+        public override void Write(Utf8JsonWriter w, int v, JsonSerializerOptions o) => w.WriteNumberValue(v);
+    }
+    public class FlexibleStringConverter : JsonConverter<string>
+    {
+        public override string Read(ref Utf8JsonReader r, Type t, JsonSerializerOptions o)
+        {
+            if (r.TokenType == JsonTokenType.Number) return r.GetInt32().ToString();
+            if (r.TokenType == JsonTokenType.String) return r.GetString() ?? "";
+            return "";
+        }
+        public override void Write(Utf8JsonWriter w, string v, JsonSerializerOptions o) => w.WriteStringValue(v);
     }
 
-    // --- 媒体信息模型 ---
+    // --- 模型 ---
+    public class ApiProvider { public string Name { get; set; } = ""; public string Url { get; set; } = ""; public string DefaultModel { get; set; } = ""; }
+
     public class MediaInfo
     {
         public string? title { get; set; }
+        public string? original_title { get; set; }
         public string type { get; set; } = "Anime";
-        public string year { get; set; } = "";
-        public int season { get; set; }
-        public int episode { get; set; }
+
+        [JsonConverter(typeof(FlexibleIntConverter))] public int year { get; set; } = 0;
+        [JsonConverter(typeof(FlexibleStringConverter))] public string season { get; set; } = "1";
+        [JsonConverter(typeof(FlexibleStringConverter))] public string episode { get; set; } = "1";
+
+        public string? episode_title { get; set; }
+        [JsonConverter(typeof(FlexibleIntConverter))] public int tmdb_id { get; set; }
+
+        public int GetSeasonInt() => ExtractInt(season);
+        public int GetEpisodeInt() => ExtractInt(episode);
+        private int ExtractInt(string? input)
+        {
+            if (string.IsNullOrEmpty(input)) return 1;
+            var match = Regex.Match(input, @"\d+");
+            return match.Success ? int.Parse(match.Value) : 1;
+        }
     }
 
-    // --- 配置模型 ---
     public class AiProfile
     {
         public string Remark { get; set; } = "默认配置";
@@ -51,7 +95,15 @@ namespace AutoAnime
         public string SourcePath { get; set; } = "";
         public string TargetPath { get; set; } = "";
         public bool IsHardLinkMode { get; set; } = true;
-        public bool RunInBackground { get; set; } = true;
+        public string AiUrl { get; set; } = "";
+        public string AiKey { get; set; } = "";
+        public string AiModel { get; set; } = "";
+        public string TmdbKey { get; set; } = "";
+        public string QbUrl { get; set; } = "";
+        public string QbUser { get; set; } = "";
+        public string QbPass { get; set; } = "";
+        public bool IsDebugMode { get; set; } = false;
+        public bool AutoStart { get; set; } = false;
         public List<AiProfile> Profiles { get; set; } = new List<AiProfile>();
         public int LastProfileIndex { get; set; } = -1;
     }
@@ -60,12 +112,19 @@ namespace AutoAnime
     {
         private FileSystemWatcher? _watcher;
         private bool _isRunning = false;
-        private static readonly HttpClient _http = new HttpClient();
-        private System.Windows.Forms.NotifyIcon? _notifyIcon;
-        private bool _isLoadingProfile = false; // 互斥锁
+        private bool _isLoadingProfile = false;
+        private bool _isRealExit = false;
 
-        public ObservableCollection<AiProfile> Profiles { get; set; } = new ObservableCollection<AiProfile>();
+        private WinForms.NotifyIcon? _notifyIcon;
+
+        private ConcurrentDictionary<string, MediaInfo> _folderContext = new ConcurrentDictionary<string, MediaInfo>();
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> _dirLocks = new ConcurrentDictionary<string, SemaphoreSlim>();
+
+        private static readonly CookieContainer _cookies = new CookieContainer();
+        private static readonly HttpClient _http = new HttpClient(new HttpClientHandler { UseCookies = true, CookieContainer = _cookies });
+
         public ObservableCollection<ApiProvider> Providers { get; set; } = new ObservableCollection<ApiProvider>();
+        public ObservableCollection<AiProfile> Profiles { get; set; } = new ObservableCollection<AiProfile>();
 
         [DllImport("Kernel32.dll", CharSet = CharSet.Unicode)]
         static extern bool CreateHardLink(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
@@ -74,317 +133,514 @@ namespace AutoAnime
         {
             InitializeComponent();
             _http.Timeout = TimeSpan.FromSeconds(60);
+            _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+            ApplicationThemeManager.ApplySystemTheme();
 
             InitProviders();
-            InitNotifyIcon();
+            InitTrayIcon();
+            CmbProfiles.ItemsSource = Profiles;
             LoadSettings();
-            CheckAutoStartStatus();
+        }
+
+        // --- 辅助：显示 WinUI 弹窗 (替代 MessageBox) ---
+        private async Task ShowDialog(string title, string content, string buttonText = "确定")
+        {
+            var dialog = new ContentDialog
+            {
+                Title = title,
+                Content = content,
+                CloseButtonText = buttonText,
+#pragma warning disable CS0618 
+                DialogHost = RootContentDialogPresenter
+#pragma warning restore CS0618
+            };
+            await dialog.ShowAsync();
+        }
+
+        // --- 系统托盘 ---
+        private void InitTrayIcon()
+        {
+            _notifyIcon = new WinForms.NotifyIcon
+            {
+                Icon = System.Drawing.SystemIcons.Application,
+                Visible = false,
+                Text = "AutoMedia AI - 双击显示"
+            };
+            _notifyIcon.DoubleClick += (s, e) => {
+                Show();
+                WindowState = WindowState.Normal;
+                _notifyIcon.Visible = false;
+            };
+        }
+
+        // --- 拦截关闭 ---
+        protected override async void OnClosing(System.ComponentModel.CancelEventArgs e)
+        {
+            if (_isRealExit) return;
+
+            e.Cancel = true;
+
+            var dialog = new ContentDialog
+            {
+                Title = "关闭程序",
+                Content = "您希望将程序最小化到系统托盘继续运行，还是彻底退出？",
+                PrimaryButtonText = "最小化到托盘",
+                SecondaryButtonText = "彻底退出",
+                CloseButtonText = "取消",
+#pragma warning disable CS0618 
+                DialogHost = RootContentDialogPresenter
+#pragma warning restore CS0618
+            };
+
+            var result = await dialog.ShowAsync();
+
+            if (result == ContentDialogResult.Primary)
+            {
+                Hide();
+                if (_notifyIcon != null) _notifyIcon.Visible = true;
+            }
+            else if (result == ContentDialogResult.Secondary)
+            {
+                _isRealExit = true;
+                if (_notifyIcon != null) _notifyIcon.Dispose();
+                Close();
+            }
+        }
+
+        // --- 开机自启 ---
+        private void SwAutoStart_Click(object sender, RoutedEventArgs e)
+        {
+            string appName = "AutoMediaAI";
+            string appPath = Environment.ProcessPath ?? "";
+            if (string.IsNullOrEmpty(appPath)) { Log("❌ 无法获取程序路径", true); return; }
+
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
+                if (SwAutoStart.IsChecked == true) key?.SetValue(appName, $"\"{appPath}\"");
+                else key?.DeleteValue(appName, false);
+
+                Log($"⚙️ 开机自启已{(SwAutoStart.IsChecked == true ? "开启" : "关闭")}");
+            }
+            catch (Exception ex) { Log($"❌ 设置失败: {ex.Message}", true); SwAutoStart.IsChecked = !SwAutoStart.IsChecked; }
         }
 
         private void InitProviders()
         {
-            Providers.Add(new ApiProvider { Name = "🚀 硅基流动 (推荐)", Url = "https://api.siliconflow.cn/v1", DefaultModel = "deepseek-ai/DeepSeek-V3" });
+            Providers.Add(new ApiProvider { Name = "🚀 硅基流动 (DeepSeek)", Url = "https://api.siliconflow.cn/v1", DefaultModel = "deepseek-ai/DeepSeek-V3" });
             Providers.Add(new ApiProvider { Name = "🐋 DeepSeek (官方)", Url = "https://api.deepseek.com", DefaultModel = "deepseek-chat" });
-            Providers.Add(new ApiProvider { Name = "🥨 豆包 (火山引擎)", Url = "https://ark.cn-beijing.volces.com/api/v3", DefaultModel = "", Hint = "请填接入点 ID (ep-...)" });
-            Providers.Add(new ApiProvider { Name = "🌟 Gemini (官方)", Url = "https://generativelanguage.googleapis.com/v1beta/openai", DefaultModel = "gemini-1.5-flash" });
-            Providers.Add(new ApiProvider { Name = "🤖 ChatGPT", Url = "https://api.openai.com/v1", DefaultModel = "gpt-4o-mini" });
-            Providers.Add(new ApiProvider { Name = "🛠️ 自定义", Url = "", DefaultModel = "" });
-
+            Providers.Add(new ApiProvider { Name = "🥨 豆包 (火山引擎)", Url = "https://ark.cn-beijing.volces.com/api/v3", DefaultModel = "" });
+            Providers.Add(new ApiProvider { Name = "☁️ 阿里云 (通义千问)", Url = "https://dashscope.aliyuncs.com/compatible-mode/v1", DefaultModel = "qwen-turbo" });
+            Providers.Add(new ApiProvider { Name = "🌟 Google Gemini", Url = "https://generativelanguage.googleapis.com/v1beta/openai", DefaultModel = "gemini-1.5-flash" });
+            Providers.Add(new ApiProvider { Name = "🤖 OpenAI (GPT-4o)", Url = "https://api.openai.com/v1", DefaultModel = "gpt-4o" });
             CmbProviders.ItemsSource = Providers;
-            CmbProviders.SelectedIndex = -1;
         }
 
-        // --- 服务商下拉框逻辑 ---
-        private void CmbProviders_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        private async Task ProcessFile(string filePath)
         {
-            if (_isLoadingProfile) return; // 🔒 如果正在加载配置，禁止联动
+            if (Directory.Exists(filePath)) return;
+            string ext = Path.GetExtension(filePath).ToLower();
+            if (ext != ".mp4" && ext != ".mkv" && ext != ".avi" && ext != ".mov" && ext != ".ts") return;
 
-            if (CmbProviders.SelectedItem is ApiProvider p)
+            string parentDir = Path.GetDirectoryName(filePath) ?? "";
+            var dirLock = _dirLocks.GetOrAdd(parentDir, _ => new SemaphoreSlim(1, 1));
+
+            int maxRetries = 5;
+            for (int i = 0; i < maxRetries; i++)
             {
-                if (!p.Name.Contains("自定义"))
+                try
                 {
-                    TxtApiUrl.Text = p.Url;
-                    if (!string.IsNullOrEmpty(p.DefaultModel))
+                    await dirLock.WaitAsync();
+                    string fileName = Path.GetFileName(filePath);
+                    if (i == 0) Log($"🎬 处理文件: {fileName}"); else Log($"🔄 第 {i + 1} 次重试: {fileName}");
+
+                    MediaInfo? info = null;
+                    if (_folderContext.ContainsKey(parentDir))
                     {
-                        TxtModel.Text = p.DefaultModel;
-                        TxtModel.PlaceholderText = "模型名称";
+                        var cachedInfo = _folderContext[parentDir];
+                        Log($"⚡ 命中目录缓存: {cachedInfo.title}");
+                        var tempInfo = await CallAI(fileName);
+                        if (tempInfo != null)
+                        {
+                            info = tempInfo;
+                            info.title = cachedInfo.title;
+                            info.original_title = cachedInfo.original_title;
+                            info.year = cachedInfo.year;
+                            info.type = cachedInfo.type;
+                            info.tmdb_id = cachedInfo.tmdb_id;
+                            if (cachedInfo.season == "0") info.season = "0";
+                            CorrectEpisodeByRegex(fileName, info);
+                            if (info.tmdb_id > 0) await GetEpisodeTitle("", info);
+                        }
                     }
                     else
                     {
-                        TxtModel.Text = "";
-                        TxtModel.PlaceholderText = p.Hint;
-                    }
-                }
-                else
-                {
-                    TxtApiUrl.PlaceholderText = "请输入 API 地址";
-                    TxtModel.PlaceholderText = "请输入模型名称";
-                }
-            }
-        }
-
-        // --- 核心修复：把加载逻辑抽离出来 ---
-        private void ApplyProfile(AiProfile p)
-        {
-            if (p == null) return;
-
-            // 🔒 上锁
-            _isLoadingProfile = true;
-
-            // 1. 恢复服务商下拉框
-            if (p.ProviderIndex >= 0 && p.ProviderIndex < Providers.Count)
-            {
-                CmbProviders.SelectedIndex = p.ProviderIndex;
-            }
-            else
-            {
-                // 模糊匹配
-                CmbProviders.SelectedIndex = Providers.Count - 1; // 默认自定义
-                for (int i = 0; i < Providers.Count; i++)
-                {
-                    if (!string.IsNullOrEmpty(Providers[i].Url) && p.ApiUrl.Contains(Providers[i].Url))
-                    {
-                        CmbProviders.SelectedIndex = i;
-                        break;
-                    }
-                }
-            }
-
-            // 2. 恢复文本框
-            TxtRemark.Text = p.Remark;
-            TxtApiUrl.Text = p.ApiUrl;
-            TxtModel.Text = p.Model;
-            TxtApiKey.Password = p.ApiKey;
-            TxtTmdbKey.Password = p.TmdbKey;
-
-            // 🔓 解锁
-            _isLoadingProfile = false;
-        }
-
-        // 事件 1：当选中项改变时触发（两个以上时会触发）
-        private void CmbProfiles_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
-        {
-            if (CmbProfiles.SelectedItem is AiProfile p)
-            {
-                ApplyProfile(p);
-            }
-        }
-
-        // 事件 2：🔥 修复点 - 当下拉框关闭时触发（点击同一个也会触发）
-        private void CmbProfiles_DropDownClosed(object sender, EventArgs e)
-        {
-            if (CmbProfiles.SelectedItem is AiProfile p)
-            {
-                ApplyProfile(p);
-            }
-        }
-
-        // --- 保存逻辑 ---
-        private void BtnSaveProfile_Click(object sender, RoutedEventArgs e)
-        {
-            if (string.IsNullOrWhiteSpace(TxtRemark.Text))
-            {
-                Log("⚠️ 请填写【备注名】再保存");
-                return;
-            }
-
-            var newProfile = new AiProfile
-            {
-                Remark = TxtRemark.Text,
-                ApiUrl = TxtApiUrl.Text,
-                Model = TxtModel.Text,
-                ApiKey = TxtApiKey.Password,
-                TmdbKey = TxtTmdbKey.Password,
-                ProviderIndex = CmbProviders.SelectedIndex
-            };
-
-            bool found = false;
-            for (int i = 0; i < Profiles.Count; i++)
-            {
-                if (Profiles[i].Remark == newProfile.Remark)
-                {
-                    Profiles[i] = newProfile;
-                    // 强制刷新选中项
-                    _isLoadingProfile = true;
-                    CmbProfiles.SelectedIndex = i;
-                    _isLoadingProfile = false;
-
-                    found = true;
-                    Log($"💾 已更新配置: {newProfile.Remark}");
-                    break;
-                }
-            }
-
-            if (!found)
-            {
-                Profiles.Add(newProfile);
-                _isLoadingProfile = true;
-                CmbProfiles.SelectedIndex = Profiles.Count - 1;
-                _isLoadingProfile = false;
-                Log($"💾 新增配置: {newProfile.Remark}");
-            }
-
-            SaveSettings();
-        }
-
-        // --- 以下逻辑保持不变 ---
-
-        private void BtnDeleteProfile_Click(object sender, RoutedEventArgs e)
-        {
-            if (CmbProfiles.SelectedItem is AiProfile p)
-            {
-                Profiles.Remove(p);
-                TxtRemark.Text = ""; TxtApiKey.Password = ""; TxtTmdbKey.Password = "";
-                SaveSettings();
-                Log("🗑️ 配置已删除");
-            }
-        }
-
-        private async void BtnManual_Click(object sender, RoutedEventArgs e)
-        {
-            var d = new Microsoft.Win32.OpenFileDialog { Filter = "视频|*.mp4;*.mkv;*.avi;*.mov", Multiselect = true };
-            if (d.ShowDialog() == true)
-            {
-                foreach (var f in d.FileNames)
-                {
-                    var info = await CallAI(Path.GetFileName(f));
-                    if (info != null && !string.IsNullOrEmpty(info.title))
-                    {
+                        info = await CallAI(fileName);
+                        if (info == null) throw new Exception("AI 识别返回空");
+                        if (!string.IsNullOrEmpty(info.title)) info.title = Regex.Replace(info.title, @"\s*-\s*\d+$", "").Trim();
+                        if (!string.IsNullOrEmpty(info.original_title)) info.original_title = Regex.Replace(info.original_title, @"\s*-\s*\d+$", "").Trim();
+                        if (IsSpecialEpisode(info.original_title) || IsSpecialEpisode(fileName)) { Log("✨ 检测到特别篇/OVA，修正为 Season 0"); info.season = "0"; }
+                        CorrectEpisodeByRegex(fileName, info);
+                        Log($"🤖 AI 识别: {info.title} (S{info.season}E{info.episode})");
                         info = await CorrectByTmdb(info);
-                        ProcessFile(f, info);
+                        if (!string.IsNullOrEmpty(info.title)) { _folderContext[parentDir] = info; Log($"🔒 目录已锁定为: {info.title}"); }
+                    }
+
+                    if (info != null)
+                    {
+                        string finalPath = DoMoveOrLink(filePath, info);
+                        if (!string.IsNullOrEmpty(finalPath)) { Log($"✅ 入库成功: {Path.GetFileName(finalPath)}"); break; }
                     }
                 }
-                Log("✅ 手动处理完成");
+                catch (Exception ex)
+                {
+                    Log($"⚠️ 异常: {ex.Message} (将在 2秒后重试)", true);
+                    await Task.Delay(2000);
+                    if (i == maxRetries - 1) Log($"❌ 最终失败: {Path.GetFileName(filePath)}", true);
+                }
+                finally { dirLock.Release(); }
             }
         }
 
-        private async void OnFileCreated(object sender, FileSystemEventArgs e)
+        private void CorrectEpisodeByRegex(string filename, MediaInfo info)
         {
-            if (Path.GetExtension(e.FullPath).ToLower() is not ".mp4" and not ".mkv") return;
-            if (e.Name != null && (e.Name.Contains("part") || e.Name.Contains("!qB"))) return;
-            await Task.Delay(2000);
-            Log($"🧠 发现: {e.Name}");
-            var info = await CallAI(e.Name ?? "");
-            if (info != null && !string.IsNullOrEmpty(info.title))
+            var match = Regex.Match(filename, @"\s-\s*(\d+)(?:\s|\[|\.)");
+            if (match.Success)
             {
-                info = await CorrectByTmdb(info);
-                ProcessFile(e.FullPath, info);
+                string numStr = match.Groups[1].Value;
+                if (info.episode != numStr)
+                {
+                    LogDebug($"[修正] AI 集数 '{info.episode}' -> 正则集数 '{numStr}'");
+                    info.episode = numStr;
+                }
             }
-            else Log("⚠️ AI 无法识别");
         }
 
         private async Task<MediaInfo?> CallAI(string filename)
         {
             try
             {
-                string model = "", key = "", url = "";
-                Dispatcher.Invoke(() => { model = TxtModel.Text; key = TxtApiKey.Password; url = TxtApiUrl.Text.TrimEnd('/'); });
+                string m = "", k = "", u = "";
+                Dispatcher.Invoke(() => { m = TxtModel.Text; k = TxtApiKey.Password; u = TxtApiUrl.Text.TrimEnd('/'); });
+                var p = $@"分析文件名 ""{filename}""。请直接返回一个标准的 JSON 对象。字段要求：1. ""title"": 中文译名 (如 '辉夜大小姐')。2. ""original_title"": 英文或罗马音原名。3. ""type"": ""Anime"" 或 ""Movie"" 或 ""TV""。4. ""year"": 年份。5. ""season"": 季号 (可以是数字或字符串 ""1"")。6. ""episode"": 集号 (可以是数字或字符串 ""01"")。";
+                LogDebug($"[AI Prompt] {p.Replace("\n", " ")}");
 
-                var prompt = $@"
-                你是一个专业的影音库整理专家。请分析文件名 ""{filename}"" 并提取信息。
-                请返回严格的 JSON 格式：{{ ""title"": ""中文通用译名"", ""type"": ""类型(Anime/Movie/Doc/TV)"", ""year"": ""年份"", ""season"": 1, ""episode"": 1 }}
-                规则：
-                1. type: Anime(动画), Movie(电影), Doc(纪录片), TV(剧集)
-                2. title: 去除副标题。
-                3. year: 电影必填。
-                ";
+                var req = new { model = m, messages = new[] { new { role = "user", content = p } } };
+                var jsonRequest = JsonSerializer.Serialize(req);
+                using var requestMessage = new HttpRequestMessage(HttpMethod.Post, u + "/chat/completions");
+                requestMessage.Headers.Add("Authorization", $"Bearer {k}");
+                requestMessage.Content = new StringContent(jsonRequest, System.Text.Encoding.UTF8, "application/json");
 
-                var req = new { model = model, messages = new[] { new { role = "user", content = prompt } }, response_format = new { type = "json_object" } };
-                var json = JsonSerializer.Serialize(req);
-                _http.DefaultRequestHeaders.Clear(); _http.DefaultRequestHeaders.Add("Authorization", $"Bearer {key}");
-                if (!url.EndsWith("/chat/completions")) url += "/chat/completions";
-
-                var res = await _http.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
-                if (!res.IsSuccessStatusCode) { Dispatcher.Invoke(() => Log($"❌ API Error: {res.StatusCode}")); return null; }
-
+                var res = await _http.SendAsync(requestMessage);
                 var str = await res.Content.ReadAsStringAsync();
-                var node = JsonNode.Parse(str);
-                var content = node?["choices"]?[0]?["message"]?["content"]?.ToString();
-                if (content != null && content.Contains("```json")) content = content.Replace("```json", "").Replace("```", "").Trim();
+                LogDebug($"[AI Response] {str}");
 
-                var info = content != null ? JsonSerializer.Deserialize<MediaInfo>(content) : null;
-                if (info != null) Dispatcher.Invoke(() => Log($"🤖 AI 识别: [{info.type}] {info.title} (S{info.season}E{info.episode})"));
-                return info;
+                if (!res.IsSuccessStatusCode) { Log($"❌ AI 请求失败: {res.StatusCode}", true); return null; }
+                var content = JsonNode.Parse(str)?["choices"]?[0]?["message"]?["content"]?.ToString();
+                if (content != null)
+                {
+                    content = content.Replace("```json", "").Replace("```", "").Trim();
+                    int firstBrace = content.IndexOf('{'); int lastBrace = content.LastIndexOf('}');
+                    if (firstBrace >= 0 && lastBrace > firstBrace) content = content.Substring(firstBrace, lastBrace - firstBrace + 1);
+                    var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true, NumberHandling = JsonNumberHandling.AllowReadingFromString, ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+                    return JsonSerializer.Deserialize<MediaInfo>(content, options);
+                }
+                return null;
             }
-            catch { return null; }
+            catch (Exception ex) { Log($"❌ AI 解析错误: {ex.Message}", true); return null; }
+        }
+
+        // 🔥 修复：使用 ShowDialog 替代 MessageBox
+        private async void BtnTestAi_Click(object s, RoutedEventArgs e)
+        {
+            Log("🔄 正在测试 AI 连接...");
+            try
+            {
+                string m = TxtModel.Text, k = TxtApiKey.Password, u = TxtApiUrl.Text.TrimEnd('/');
+                if (string.IsNullOrWhiteSpace(k)) { await ShowDialog("错误", "请先填写 API Key"); return; }
+
+                var req = new { model = m, messages = new[] { new { role = "user", content = "Say Hello" } } };
+                var jsonRequest = JsonSerializer.Serialize(req);
+                using var requestMessage = new HttpRequestMessage(HttpMethod.Post, u + "/chat/completions");
+                requestMessage.Headers.Add("Authorization", $"Bearer {k}");
+                requestMessage.Content = new StringContent(jsonRequest, System.Text.Encoding.UTF8, "application/json");
+
+                var res = await _http.SendAsync(requestMessage);
+                if (res.IsSuccessStatusCode)
+                {
+                    Log("✅ API 连接成功！配置有效。");
+                    await ShowDialog("成功", "✅ 连接成功！API 配置有效。");
+                }
+                else
+                {
+                    string err = await res.Content.ReadAsStringAsync();
+                    Log($"❌ 连接失败: {res.StatusCode} - {err}", true);
+                    await ShowDialog("失败", $"❌ 连接失败: {res.StatusCode}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ 测试异常: {ex.Message}", true);
+                await ShowDialog("异常", $"❌ 发生异常: {ex.Message}");
+            }
         }
 
         private async Task<MediaInfo> CorrectByTmdb(MediaInfo info)
         {
-            string key = ""; Dispatcher.Invoke(() => key = TxtTmdbKey.Password);
+            string key = ""; Dispatcher.Invoke(() => key = TxtTmdbKey.Password.Trim());
             if (string.IsNullOrWhiteSpace(key)) return info;
             try
             {
-                bool isMovie = info.type == "Movie";
-                string searchType = isMovie ? "movie" : "tv";
-                string yearParam = isMovie && !string.IsNullOrEmpty(info.year) ? $"&year={info.year}" : "";
-
-                Dispatcher.Invoke(() => Log($"🎬 TMDB 搜{searchType}: {info.title} {info.year}"));
-                var res = await _http.GetStringAsync($"[https://api.themoviedb.org/3/search/](https://api.themoviedb.org/3/search/){searchType}?api_key={key}&query={Uri.EscapeDataString(info.title ?? "")}&language=zh-CN{yearParam}");
-                var node = JsonNode.Parse(res);
-                var results = node?["results"]?.AsArray();
-
-                if (results != null && results.Count > 0)
+                string type = info.type.ToLower() == "movie" ? "movie" : "tv";
+                JsonNode? bestMatch = null;
+                string searchTitle = CleanTitle(info.title);
+                LogDebug($"[TMDB Search CN] {searchTitle}");
+                bestMatch = await SearchTmdb(key, type, searchTitle);
+                if (bestMatch == null && !string.IsNullOrEmpty(info.original_title))
                 {
-                    var officialName = isMovie ? results[0]?["title"]?.ToString() : results[0]?["name"]?.ToString();
-                    var date = results[0]?["release_date"]?.ToString();
-                    if (isMovie && !string.IsNullOrEmpty(date) && date.Length >= 4) info.year = date.Substring(0, 4);
-                    if (officialName != null && officialName != info.title)
-                    {
-                        Dispatcher.Invoke(() => Log($"✅ TMDB 校正: {info.title} -> {officialName}"));
-                        info.title = officialName;
-                    }
+                    string cleanOriginal = CleanTitle(info.original_title);
+                    LogDebug($"[TMDB Search Origin] {cleanOriginal}");
+                    bestMatch = await SearchTmdb(key, type, cleanOriginal);
                 }
-                else Dispatcher.Invoke(() => Log("⚠️ TMDB 未找到，保持原名"));
+                if (bestMatch != null)
+                {
+                    info.tmdb_id = bestMatch["id"]?.GetValue<int>() ?? 0;
+                    info.title = type == "movie" ? bestMatch["title"]?.ToString() : bestMatch["name"]?.ToString();
+                    string date = type == "movie" ? bestMatch["release_date"]?.ToString() : bestMatch["first_air_date"]?.ToString();
+                    if (date?.Length >= 4 && int.TryParse(date.Substring(0, 4), out int y)) info.year = y;
+                    Log($"✅ TMDB 锁定: {info.title} (ID: {info.tmdb_id})");
+                    if (type == "tv" && info.tmdb_id > 0) await GetEpisodeTitle(key, info);
+                }
             }
-            catch { Dispatcher.Invoke(() => Log("⚠️ TMDB 连接失败")); }
+            catch (Exception ex) { Log($"⚠️ TMDB 错误: {ex.Message}", true); }
             return info;
         }
 
-        private void ProcessFile(string src, MediaInfo info)
+        private async Task<JsonNode?> SearchTmdb(string key, string type, string query)
+        {
+            if (string.IsNullOrWhiteSpace(query)) return null;
+            try
+            {
+                string url = $"https://api.themoviedb.org/3/search/{type}?api_key={key}&query={Uri.EscapeDataString(query)}&language=zh-CN";
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(10));
+                var res = await _http.GetStringAsync(url, cts.Token);
+                var results = JsonNode.Parse(res)?["results"]?.AsArray();
+                if (results != null && results.Count > 0) return results[0];
+            }
+            catch { }
+            return null;
+        }
+
+        private async Task GetEpisodeTitle(string key, MediaInfo info)
         {
             try
             {
-                string root = "", safeTitle = info.title ?? "Unknown";
-                Dispatcher.Invoke(() => root = TxtTarget.Text);
-                foreach (var c in Path.GetInvalidFileNameChars()) safeTitle = safeTitle.Replace(c, '_');
-
-                string categoryDir = info.type switch { "Anime" => "动漫", "Movie" => "电影", "Doc" => "纪录片", "TV" => "电视剧", _ => "其他" };
-                string finalPath;
-
-                if (info.type == "Movie")
+                if (string.IsNullOrEmpty(key)) Dispatcher.Invoke(() => key = TxtTmdbKey.Password.Trim());
+                int seasonNum = info.GetSeasonInt() == 0 ? 1 : info.GetSeasonInt();
+                string url = $"https://api.themoviedb.org/3/tv/{info.tmdb_id}/season/{seasonNum}?api_key={key}&language=zh-CN";
+                LogDebug($"[TMDB Episode URL] {url}");
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(10));
+                var res = await _http.GetStringAsync(url, cts.Token);
+                var episodes = JsonNode.Parse(res)?["episodes"]?.AsArray();
+                if (episodes != null)
                 {
-                    string yearSuffix = string.IsNullOrEmpty(info.year) ? "" : $" ({info.year})";
-                    string dir = Path.Combine(root, categoryDir, $"{safeTitle}{yearSuffix}");
-                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                    finalPath = Path.Combine(dir, $"{safeTitle}{yearSuffix}{Path.GetExtension(src)}");
+                    foreach (var ep in episodes)
+                    {
+                        if (ep?["episode_number"]?.GetValue<int>() == info.GetEpisodeInt())
+                        {
+                            info.episode_title = ep?["name"]?.ToString();
+                            Log($"📚 单集标题: {info.episode_title}");
+                            break;
+                        }
+                    }
                 }
-                else
-                {
-                    string dir = Path.Combine(root, categoryDir, safeTitle, $"Season {info.season}");
-                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                    finalPath = Path.Combine(dir, $"{safeTitle} - S{info.season:D2}E{info.episode:D2}{Path.GetExtension(src)}");
-                }
-
-                if (File.Exists(finalPath)) { Dispatcher.Invoke(() => Log($"⚠️ 目标已存在: {Path.GetFileName(finalPath)}")); return; }
-                bool link = true; Dispatcher.Invoke(() => link = CmbMode.SelectedIndex == 0);
-                if (link) { if (CreateHardLink(finalPath, src, IntPtr.Zero)) Dispatcher.Invoke(() => Log($"🔗 硬链成功: {categoryDir}/{Path.GetFileName(finalPath)}")); else Dispatcher.Invoke(() => Log("❌ 硬链失败")); }
-                else { File.Move(src, finalPath); Dispatcher.Invoke(() => Log($"📦 移动成功: {categoryDir}/{Path.GetFileName(finalPath)}")); }
             }
-            catch (Exception ex) { Dispatcher.Invoke(() => Log($"❌ 操作失败: {ex.Message}")); }
+            catch { }
         }
 
-        private void LoadSettings() { try { if (File.Exists("settings.json")) { var s = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText("settings.json")); if (s != null) { TxtSource.Text = s.SourcePath; TxtTarget.Text = s.TargetPath; CmbMode.SelectedIndex = s.IsHardLinkMode ? 0 : 1; ChkTray.IsChecked = s.RunInBackground; Profiles.Clear(); if (s.Profiles != null) foreach (var p in s.Profiles) Profiles.Add(p); CmbProfiles.ItemsSource = Profiles; if (s.LastProfileIndex >= 0 && s.LastProfileIndex < Profiles.Count) CmbProfiles.SelectedIndex = s.LastProfileIndex; } } else CmbProfiles.ItemsSource = Profiles; } catch { } }
-        private void SaveSettings() { try { var s = new AppSettings { SourcePath = TxtSource.Text, TargetPath = TxtTarget.Text, IsHardLinkMode = CmbMode.SelectedIndex == 0, RunInBackground = ChkTray.IsChecked == true, Profiles = new List<AiProfile>(Profiles), LastProfileIndex = CmbProfiles.SelectedIndex }; File.WriteAllText("settings.json", JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true })); } catch { } }
-        private void InitNotifyIcon() { _notifyIcon = new System.Windows.Forms.NotifyIcon(); try { _notifyIcon.Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath); } catch { } _notifyIcon.Text = "AutoMedia AI"; _notifyIcon.Visible = true; _notifyIcon.DoubleClick += (s, e) => { Show(); WindowState = WindowState.Normal; Activate(); }; var m = new System.Windows.Forms.ContextMenuStrip(); m.Items.Add("显示", null, (s, e) => { Show(); WindowState = WindowState.Normal; Activate(); }); m.Items.Add("退出", null, (s, e) => { if (_notifyIcon != null) _notifyIcon.Visible = false; System.Windows.Application.Current.Shutdown(); }); _notifyIcon.ContextMenuStrip = m; }
-        protected override void OnClosing(System.ComponentModel.CancelEventArgs e) { if (ChkTray.IsChecked == true && _notifyIcon != null) { e.Cancel = true; this.Hide(); _notifyIcon.ShowBalloonTip(3000, "AutoMedia", "最小化到托盘", System.Windows.Forms.ToolTipIcon.Info); } else { if (_notifyIcon != null) _notifyIcon.Visible = false; base.OnClosing(e); } }
-        private void CheckAutoStartStatus() { try { using var k = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false); string? v = k?.GetValue("AutoAnime")?.ToString(); ChkAutoStart.Checked -= ChkAutoStart_Changed; ChkAutoStart.Unchecked -= ChkAutoStart_Changed; ChkAutoStart.IsChecked = (v != null && v == System.Windows.Forms.Application.ExecutablePath); ChkAutoStart.Checked += ChkAutoStart_Changed; ChkAutoStart.Unchecked += ChkAutoStart_Changed; } catch { } }
-        private void ChkAutoStart_Changed(object s, RoutedEventArgs e) { try { using var k = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true); if (ChkAutoStart.IsChecked == true) k?.SetValue("AutoAnime", System.Windows.Forms.Application.ExecutablePath); else k?.DeleteValue("AutoAnime", false); } catch { ChkAutoStart.IsChecked = !ChkAutoStart.IsChecked; } }
-        private void BtnRestart_Click(object s, RoutedEventArgs e) { SaveSettings(); if (_notifyIcon != null) _notifyIcon.Visible = false; Process.Start(Environment.ProcessPath!); System.Windows.Application.Current.Shutdown(); }
+        private string CleanTitle(string? input)
+        {
+            if (string.IsNullOrEmpty(input)) return "";
+            string clean = Regex.Replace(input, @"\[.*?\]|\(.*?\)|\{.*?\}", " ");
+            clean = Regex.Replace(clean, @"(?i)(webrip|1080p|720p|hevc|x264|x265|aac|srtx2|10bit|assx2)", " ");
+            return Regex.Replace(clean, @"\s+", " ").Trim();
+        }
+
+        private bool IsSpecialEpisode(string? text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            string[] keywords = { "OVA", "OAD", "Special", "SP", "Otona e no Kaidan", "Movie", "Gekijouban", "The Movie" };
+            foreach (var kw in keywords) { if (text.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0) return true; }
+            return false;
+        }
+
+        private string DoMoveOrLink(string src, MediaInfo info)
+        {
+            string root = ""; Dispatcher.Invoke(() => root = TxtTarget.Text);
+            if (string.IsNullOrEmpty(root)) return "";
+            string safeTitle = info.title?.Replace(":", " ") ?? "Unknown";
+            foreach (var c in Path.GetInvalidFileNameChars()) safeTitle = safeTitle.Replace(c, '_');
+            safeTitle = safeTitle.Trim();
+            int sNum = info.GetSeasonInt(); int eNum = info.GetEpisodeInt();
+            string cat = info.type == "Movie" ? "电影" : "动漫";
+            string dir = info.type == "Movie" ? Path.Combine(root, cat, $"{safeTitle} ({info.year})") : Path.Combine(root, cat, safeTitle, $"Season {sNum}");
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            string ext = Path.GetExtension(src);
+            string newName;
+            if (info.type == "Movie") newName = $"{safeTitle} ({info.year}){ext}";
+            else
+            {
+                string epTitle = string.IsNullOrWhiteSpace(info.episode_title) ? "" : $" - {info.episode_title}";
+                foreach (var c in Path.GetInvalidFileNameChars()) epTitle = epTitle.Replace(c, '_');
+                newName = $"{safeTitle} - S{sNum:D2}E{eNum:D2}{epTitle}{ext}";
+            }
+            string dest = Path.Combine(dir, newName);
+            bool isLink = true; bool skip = true;
+            Dispatcher.Invoke(() => { isLink = RadioLink.IsChecked == true; skip = SwSkipLink.IsChecked == true; });
+            if (File.Exists(dest)) { if (skip) { Log($"⚠️ 跳过已存在: {newName}"); return dest; } else File.Delete(dest); }
+            if (isLink) { if (CreateHardLink(dest, src, IntPtr.Zero)) { } else { Log("❌ 硬链失败，尝试移动...", true); isLink = false; } }
+            if (!isLink) File.Move(src, dest);
+            return dest;
+        }
+
+        private void BtnStart_Click(object s, RoutedEventArgs e)
+        {
+            if (_isRunning)
+            {
+                if (_watcher != null) { _watcher.EnableRaisingEvents = false; _watcher.Dispose(); _watcher = null; }
+                Log("🛑 监控已停止"); _folderContext.Clear(); _dirLocks.Clear();
+                BtnStart.Content = "启动全能监控"; BtnStart.Appearance = ControlAppearance.Primary;
+            }
+            else
+            {
+                if (!Directory.Exists(TxtSource.Text)) { ShowDialog("错误", "源目录不存在").ConfigureAwait(false); return; }
+                SaveSettings();
+                _watcher = new FileSystemWatcher(TxtSource.Text) { IncludeSubdirectories = true, EnableRaisingEvents = true };
+                _watcher.Created += async (s, ev) => await ProcessFile(ev.FullPath);
+                _watcher.Renamed += async (s, ev) => await ProcessFile(ev.FullPath);
+                Log($"🚀 监控启动中... [{TxtSource.Text}]");
+                BtnStart.Content = "停止监控"; BtnStart.Appearance = ControlAppearance.Danger;
+            }
+            _isRunning = !_isRunning;
+        }
+
+        private async void BtnManual_Click(object s, RoutedEventArgs e)
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog { Multiselect = true };
+            if (dlg.ShowDialog() == true) { foreach (var file in dlg.FileNames) await ProcessFile(file); Log("✅ 手动批处理完成"); }
+        }
+
+        // 🔥 修复：使用 ShowDialog 替代 MessageBox
+        private async void BtnTestQb_Click(object s, RoutedEventArgs e)
+        {
+            bool ok = await Task.Run(async () => {
+                try
+                {
+                    var url = TxtQbUrl.Text.TrimEnd('/');
+                    var content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("username", TxtQbUser.Text), new KeyValuePair<string, string>("password", TxtQbPass.Password) });
+                    var req = new HttpRequestMessage(HttpMethod.Post, $"{url}/api/v2/auth/login") { Content = content };
+                    req.Headers.Referrer = new Uri(url);
+                    var res = await _http.SendAsync(req);
+                    return res.IsSuccessStatusCode && !(await res.Content.ReadAsStringAsync()).Contains("Fails.");
+                }
+                catch { return false; }
+            });
+            if (ok) await ShowDialog("成功", "✅ qBittorrent 连接成功"); else await ShowDialog("失败", "❌ 连接失败，请检查配置");
+        }
+
+        private void CmbProviders_SelectionChanged(object s, SelectionChangedEventArgs e)
+        {
+            if (!_isLoadingProfile && CmbProviders.SelectedItem is ApiProvider p) { TxtApiUrl.Text = p.Url; if (!string.IsNullOrEmpty(p.DefaultModel)) TxtModel.Text = p.DefaultModel; }
+        }
+
+        private void CmbProfiles_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (CmbProfiles.SelectedItem is AiProfile p) ApplyProfile(p); }
+
+        private void ApplyProfile(AiProfile p)
+        {
+            _isLoadingProfile = true;
+            if (p.ProviderIndex >= 0 && p.ProviderIndex < CmbProviders.Items.Count) CmbProviders.SelectedIndex = p.ProviderIndex;
+            TxtRemark.Text = p.Remark; TxtApiUrl.Text = p.ApiUrl; TxtModel.Text = p.Model; TxtApiKey.Password = p.ApiKey; TxtTmdbKey.Password = p.TmdbKey;
+            _isLoadingProfile = false;
+        }
+
+        // 🔥 修复：使用 ShowDialog 替代 MessageBox
+        private async void BtnSaveProfile_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(TxtRemark.Text)) { await ShowDialog("提示", "请填写配置备注名！"); return; }
+            var newProfile = new AiProfile { Remark = TxtRemark.Text, ApiUrl = TxtApiUrl.Text, Model = TxtModel.Text, ApiKey = TxtApiKey.Password, TmdbKey = TxtTmdbKey.Password, ProviderIndex = CmbProviders.SelectedIndex };
+            var existing = null as AiProfile;
+            foreach (var p in Profiles) if (p.Remark == newProfile.Remark) { existing = p; break; }
+            if (existing != null) Profiles.Remove(existing);
+            Profiles.Add(newProfile);
+            CmbProfiles.SelectedItem = newProfile;
+            SaveSettings();
+
+            await ShowDialog("保存成功", "配置已成功保存到本地预设。");
+        }
+
+        private void BtnDeleteProfile_Click(object sender, RoutedEventArgs e) { if (CmbProfiles.SelectedItem is AiProfile p) { Profiles.Remove(p); SaveSettings(); } }
         private void BtnSelectSource_Click(object s, RoutedEventArgs e) => TxtSource.Text = SelectFolder();
         private void BtnSelectTarget_Click(object s, RoutedEventArgs e) => TxtTarget.Text = SelectFolder();
-        private string SelectFolder() { using var d = new System.Windows.Forms.FolderBrowserDialog(); return d.ShowDialog() == System.Windows.Forms.DialogResult.OK ? d.SelectedPath : ""; }
-        private void BtnStart_Click(object s, RoutedEventArgs e) { if (_isRunning) { if (_watcher != null) { _watcher.EnableRaisingEvents = false; _watcher.Dispose(); _watcher = null; } Log("🛑 监控停止"); BtnStart.Content = "启动全能监控"; BtnStart.Appearance = Wpf.Ui.Controls.ControlAppearance.Primary; } else { if (string.IsNullOrWhiteSpace(TxtSource.Text) || string.IsNullOrWhiteSpace(TxtApiKey.Password)) { Log("❌ 请填写配置"); return; } try { _watcher = new FileSystemWatcher(TxtSource.Text); _watcher.IncludeSubdirectories = true; _watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite; _watcher.Created += OnFileCreated; _watcher.Renamed += OnFileCreated; _watcher.EnableRaisingEvents = true; Log($"🚀 监控启动: {TxtSource.Text}"); } catch (Exception ex) { Log($"❌ 启动失败: {ex.Message}"); return; } BtnStart.Content = "停止监控"; BtnStart.Appearance = Wpf.Ui.Controls.ControlAppearance.Danger; SaveSettings(); } _isRunning = !_isRunning; }
-        private void Log(string msg) { if (!Dispatcher.CheckAccess()) { Dispatcher.Invoke(() => Log(msg)); return; } TxtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {msg}\n"); TxtLog.ScrollToEnd(); }
+        private string SelectFolder() { using var d = new WinForms.FolderBrowserDialog(); return d.ShowDialog() == WinForms.DialogResult.OK ? d.SelectedPath : ""; }
+        private void BtnClearLog_Click(object s, RoutedEventArgs e) => TxtLog.Document.Blocks.Clear();
+
+        private void Log(string msg, bool isError = false)
+        {
+            if (!Dispatcher.CheckAccess()) { Dispatcher.Invoke(() => Log(msg, isError)); return; }
+            var run = new Run($"[{DateTime.Now:HH:mm:ss}] {msg}");
+            if (isError) run.Foreground = MediaBrushes.OrangeRed;
+            var paragraph = new Paragraph(run); paragraph.Margin = new Thickness(0);
+            TxtLog.Document.Blocks.Add(paragraph); TxtLog.ScrollToEnd();
+        }
+
+        private void LogDebug(string msg) { bool isDebug = false; Dispatcher.Invoke(() => isDebug = ChkDebug.IsChecked == true); if (isDebug) Log($"[DEBUG] {msg}"); }
+
+        private void LoadSettings()
+        {
+            try
+            {
+                if (File.Exists("settings.json"))
+                {
+                    var s = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText("settings.json"));
+                    if (s != null)
+                    {
+                        TxtSource.Text = s.SourcePath; TxtTarget.Text = s.TargetPath;
+                        RadioLink.IsChecked = s.IsHardLinkMode; RadioMove.IsChecked = !s.IsHardLinkMode;
+                        TxtApiUrl.Text = s.AiUrl ?? ""; TxtApiKey.Password = s.AiKey ?? ""; TxtTmdbKey.Password = s.TmdbKey ?? "";
+                        TxtModel.Text = s.AiModel ?? ""; TxtQbUrl.Text = s.QbUrl ?? ""; TxtQbUser.Text = s.QbUser ?? ""; TxtQbPass.Password = s.QbPass ?? "";
+                        ChkDebug.IsChecked = s.IsDebugMode; SwAutoStart.IsChecked = s.AutoStart;
+                        if (s.Profiles != null) foreach (var p in s.Profiles) Profiles.Add(p);
+                        if (s.LastProfileIndex >= 0 && s.LastProfileIndex < Profiles.Count) CmbProfiles.SelectedIndex = s.LastProfileIndex;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SaveSettings()
+        {
+            try
+            {
+                var s = new AppSettings
+                {
+                    SourcePath = TxtSource.Text,
+                    TargetPath = TxtTarget.Text,
+                    IsHardLinkMode = RadioLink.IsChecked == true,
+                    AiUrl = TxtApiUrl.Text,
+                    AiKey = TxtApiKey.Password,
+                    TmdbKey = TxtTmdbKey.Password,
+                    AiModel = TxtModel.Text,
+                    QbUrl = TxtQbUrl.Text,
+                    QbUser = TxtQbUser.Text,
+                    QbPass = TxtQbPass.Password,
+                    IsDebugMode = ChkDebug.IsChecked == true,
+                    AutoStart = SwAutoStart.IsChecked == true,
+                    Profiles = new List<AiProfile>(Profiles),
+                    LastProfileIndex = CmbProfiles.SelectedIndex
+                }; File.WriteAllText("settings.json", JsonSerializer.Serialize(s));
+            }
+            catch { }
+        }
     }
 }
